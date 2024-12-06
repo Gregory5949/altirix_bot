@@ -198,7 +198,7 @@ def start(message: types.Message):
 
     # Проверка словарей для данного пользователя
     if user_id not in user_conversations:
-        user_conversations[user_id] = ConversationBufferMemory()
+        user_conversations[user_id] = ChatMessageHistory()
 
     if user_id not in user_llm_rag:
         user_llm_rag[user_id] = create_llm_rag(user_id)
@@ -282,14 +282,14 @@ def handle_text_message(message):
     user_id = message.chat.id
 
     # Проверка словарей для данного пользователя
-    # if user_id not in user_conversations:
-    #     user_conversations[user_id] = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+    if user_id not in user_conversations:
+        user_conversations[user_id] = ChatMessageHistory()
 
     if user_id not in user_llm_rag:
         user_llm_rag[user_id] = create_llm_rag(user_id)
 
     vdb, embedding_retriever, llm, rag_chain, conversation = user_llm_rag[user_id]
-    # conversation.memory = user_conversations[user_id]
+    conversation.memory = user_conversations[user_id]
 
     q1 = message.text
     print(q1)
