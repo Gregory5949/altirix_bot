@@ -1,24 +1,19 @@
-from langchain.chains.question_answering.map_rerank_prompt import output_parser
-from langchain.retrievers import MultiQueryRetriever, ContextualCompressionRetriever, EnsembleRetriever
-from langchain.retrievers.document_compressors import EmbeddingsFilter, DocumentCompressorPipeline
+from langchain.retrievers import MultiQueryRetriever, ContextualCompressionRetriever
 from langchain_community.chat_models import GigaChat
 
 from langchain.chains import ConversationChain
-from langchain.memory import ConversationBufferMemory, ConversationSummaryBufferMemory
+from langchain.memory import ConversationBufferMemory
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_chroma import Chroma
 from langchain_community.document_compressors import FlashrankRerank
 from langchain_community.embeddings import GigaChatEmbeddings
-from langchain_community.retrievers import BM25Retriever
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.prompts import ChatPromptTemplate
 from langchain.chains import create_retrieval_chain
 
 from langchain_community.document_loaders import UnstructuredWordDocumentLoader
 from langchain_community.document_loaders import UnstructuredPDFLoader
 from langchain_community.document_loaders import UnstructuredXMLLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_core.runnables import RunnableBranch
-
 from config import sber, bot_token
 from langgraph.graph import START, MessagesState, StateGraph
 
@@ -29,7 +24,7 @@ doc_store = 'data'  # Путь для сохранения векторных х
 
 rag_prompt = ChatPromptTemplate.from_template('''Ты чат-бот помощник, созданный компанией Альтирикс системс. You MUST answer to questions only in Russian. Вы отвечаете только на вопросы по темам информационной безопасности, компьютерной безопасности и кибербезопасности. Если вопрос задан на другом языке или в вашем хранилище RAG нет информации для ответа, сообщите об этом пользователю. Не отвечайте на общие вопросы, такие как "Как дела?" и вопросы, заданные не на русском языке. Ответ должен быть до 300 символов. Прежде чем ответить, проанализируйте запрос и определите его тематическую область.
 Контекст: {context}
-Вопрос: {input}''' )
+Вопрос: {input}''')
 
 # Создать объект бота
 import telebot
@@ -38,10 +33,6 @@ from telebot import types
 
 bot = telebot.TeleBot(bot_token)
 
-def call_model(state: MessagesState):
-    response = model.invoke(state["messages"])
-    # We return a list, because this will get added to the existing list
-    return {"messages": response}
 
 def create_llm_rag(user_id):
     llm = GigaChat(credentials=sber,
@@ -50,24 +41,16 @@ def create_llm_rag(user_id):
                    profanity_check=False,
 
                    )
-
+    # Создать эмбеддер
     embeddings = GigaChatEmbeddings(credentials=sber, verify_ssl_certs=False)
     vector_store = Chroma(
         persist_directory="/Users/gd/Desktop/altirix_bot_chromadbs/chroma_db_docs28885_ch_size500_ch_overlap50_gigachat_embs",
         embedding_function=embeddings)
-    # print(len(vector_store._collection.get(include=['embeddings'])['embeddings']))
-    # print(vector_store._collection_name)
-
-
-
-    vector_retriever = vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 10})
-
-    # Keyword search retriever using BM25
-    keyword_retriever = BM25Retriever.from_texts(vector_store.get()['documents'])
-    embedding_retriever = EnsembleRetriever(retrievers=[keyword_retriever, vector_retriever], weights=[0.5, 0.5])
-    # embedding_retriever = MultiQueryRetriever.from_llm(
-    #     retriever=vector_store.as_retriever(), llm=llm
-    # )
+    print(len(vector_store._collection.get(include=['embeddings'])['embeddings']))
+    print(vector_store._collection_name)
+    embedding_retriever = MultiQueryRetriever.from_llm(
+        retriever=vector_store.as_retriever(), llm=llm
+    )
     # embedding_retriever = vector_store.as_retriever()
 
     compressor = FlashrankRerank()
@@ -94,41 +77,8 @@ def create_rag_chain(user_id, llm, embedding_retriever):
     )
     # Создадим вопросно-ответную цепочку с помощью функции create_retrieval_chain().
     # используем ретривет для векторной базы с книгой
-
-    query_transform_prompt = ChatPromptTemplate.from_messages(
-        [
-            ("system", "Учитывая приведённый ниже разговор, сгенерируйте поисковый запрос для поиска информации, относящейся к разговору. Ответьте только запросом, ничего больше."),
-            MessagesPlaceholder(variable_name="messages")
-        ]
-    )
-
-    # output_parser = StrOutputParser()
-
-    # splitter = TokenTextSplitter(chunk_size=CHAT_DOC_SPLIT_SIZE, chunk_overlap=0)
-    embeddings_filter = EmbeddingsFilter(
-        embeddings = GigaChatEmbeddings(credentials=sber, verify_ssl_certs=False),
-        similarity_threshold=0.1
-    )
-    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-
-    pipeline_compressor = DocumentCompressorPipeline(
-        transformers=[splitter, embeddings_filter]
-    )
-
-    compression_retriever = ContextualCompressionRetriever(
-        base_compressor=pipeline_compressor, base_retriever=embedding_retriever
-    )
-
-    query_transforming_retriever_chain = RunnableBranch(
-        (
-            lambda x: len(x.get("messages", [])) == 1,
-            (lambda x: x["messages"][-1].content) | compression_retriever,
-        ),
-        query_transform_prompt | llm | output_parser | compression_retriever,
-    ).with_config(run_name="chat_retriever_chain")
-
-    # retrieval_chain = create_retrieval_chain(embedding_retriever, document_chain)
-    return (query_transforming_retriever_chain)
+    retrieval_chain = create_retrieval_chain(embedding_retriever, document_chain)
+    return (retrieval_chain)
 
 
 # Создать цепочку диалога
@@ -138,7 +88,6 @@ def create_conversation_chain(user_id, llm):
     # Создать объект цепочки диалога - инициализация ConversationChain
     conversation = ConversationChain(llm=llm,
                                      verbose=True,
-                                     # memory=ConversationSummaryBufferMemory(max_tokens=100))
                                      memory=ConversationBufferMemory())
 
     # Обращение к системе
@@ -284,7 +233,6 @@ def handle_text_message(message):
 
     vdb, embedding_retriever, llm, rag_chain, conversation = user_llm_rag[user_id]
     conversation.memory = user_conversations[user_id]
-
 
     q1 = message.text
     print(q1)
