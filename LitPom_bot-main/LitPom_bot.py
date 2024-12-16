@@ -89,8 +89,8 @@ def create_llm_rag(user_id):
     vector_store = Chroma(
         persist_directory="/Users/gd/PycharmProjects/altirix_systems_chatbot/chromadb_chunk_size_1200",
         embedding_function=embeddings)
-    retriever_vanilla = vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 8, })
-    retriever_mmr = vector_store.as_retriever(search_type="mmr", search_kwargs={"k": 8, })
+    retriever_vanilla = vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 16, })
+    retriever_mmr = vector_store.as_retriever(search_type="mmr", search_kwargs={"k": 16, })
 
     retriever_BM25 = BM25Retriever.from_texts(vector_store.get()['documents'])
 
