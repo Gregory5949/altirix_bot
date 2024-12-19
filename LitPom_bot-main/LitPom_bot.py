@@ -86,21 +86,11 @@ def create_llm_rag(user_id):
                    profanity_check=False,
                    )
 
-    # print(232432434242343)
-    mounted_dir = os.environ.get('MOUNTED_DIR')
-    print(mounted_dir)
     embeddings = GigaChatEmbeddings(credentials=sber, verify_ssl_certs=False)
     chromadb_path = "./chromadb_chunk_size_1200"
-    # if platform.system() == "Linux":
-    #     chromadb_path = mounted_dir
-
-    # full_path = os.path.join(base_path, 'chromadb_chunk_size_1200')
-    # "/Users/gd/PycharmProjects/altirix_systems_chatbot/chromadb_chunk_size_1200"
-    print(chromadb_path)
     vector_store = Chroma(
         persist_directory=chromadb_path,
         embedding_function=embeddings)
-    # print(len(vector_store.get('ids')['ids']))
     retriever_vanilla = vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 16, })
     retriever_mmr = vector_store.as_retriever(search_type="mmr", search_kwargs={"k": 16, })
 
