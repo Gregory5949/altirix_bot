@@ -1,6 +1,9 @@
+import os
+import platform
+
 from gigachat.exceptions import ResponseError
 from langchain.chains.history_aware_retriever import create_history_aware_retriever
-from langchain.retrievers import MultiQueryRetriever, ContextualCompressionRetriever, EnsembleRetriever
+from langchain.retrievers import EnsembleRetriever
 from langchain_community.chat_models import GigaChat
 from langchain.chains import ConversationChain
 from langchain.memory import ConversationBufferMemory
@@ -48,9 +51,7 @@ contextualize_q_prompt = ChatPromptTemplate.from_messages(
     ]
 )
 from langchain_community.chat_message_histories import ChatMessageHistory
-
 import psycopg2
-from datetime import datetime, timedelta
 
 
 def check_rate_limit(user_id, user_message):
@@ -85,13 +86,25 @@ def create_llm_rag(user_id):
                    profanity_check=False,
                    )
 
+    # print(232432434242343)
+    mounted_dir = os.environ.get('MOUNTED_DIR')
+    print(mounted_dir)
     embeddings = GigaChatEmbeddings(credentials=sber, verify_ssl_certs=False)
+    chromadb_path = "./chromadb_chunk_size_1200"
+    # if platform.system() == "Linux":
+    #     chromadb_path = mounted_dir
+
+    # full_path = os.path.join(base_path, 'chromadb_chunk_size_1200')
+    # "/Users/gd/PycharmProjects/altirix_systems_chatbot/chromadb_chunk_size_1200"
+    print(chromadb_path)
     vector_store = Chroma(
-        persist_directory="/Users/gd/PycharmProjects/altirix_systems_chatbot/chromadb_chunk_size_1200",
+        persist_directory=chromadb_path,
         embedding_function=embeddings)
+    # print(len(vector_store.get('ids')['ids']))
     retriever_vanilla = vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 16, })
     retriever_mmr = vector_store.as_retriever(search_type="mmr", search_kwargs={"k": 16, })
 
+    print(len(vector_store.get()['documents']))
     retriever_BM25 = BM25Retriever.from_texts(vector_store.get()['documents'])
 
     ensemble_retriever = EnsembleRetriever(
@@ -150,8 +163,6 @@ def start(message: types.Message):
 
 @bot.message_handler(commands=['help'])
 def help(message: types.Message):
-    user_id = message.chat.id
-
     bot.send_message(message.chat.id,
                      'Я - бот-помощник, отвечающий на вопросы по теме информационной безопасности.')
 
