@@ -16,6 +16,7 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.chains import create_retrieval_chain
 from langchain_core.runnables import RunnableWithMessageHistory
 
+
 from config import sber, bot_token, connection_params
 
 user_conversations = {}
@@ -87,7 +88,7 @@ def create_llm_rag(user_id):
                    )
 
     embeddings = GigaChatEmbeddings(credentials=sber, verify_ssl_certs=False)
-    chromadb_path = "./chromadb_chunk_size_1200"
+    chromadb_path = "/Users/nikitacesev/PycharmProjects/altirix_bot/LitPom_bot-main/chromadb_chunk_size_1200"
     vector_store = Chroma(
         persist_directory=chromadb_path,
         embedding_function=embeddings)
@@ -189,9 +190,24 @@ def handle_text_message(message):
         resp1 = rag_chain.invoke(
             {'input': q1}, config={'configurable': {'session_id': user_id}}
         )
-
-        answer = resp1['answer']
+        name_docs = []
+        new_name_docs = []
+        folder_names = []
+        for i in range(len(resp1['context'])):
+            source_path = resp1['context'][i].metadata['source']
+            name_docs.append(source_path)
+            new_name_docs.append(os.path.splitext(os.path.basename(source_path))[0])
+            folder_names.append(os.path.basename(os.path.dirname(source_path)))
+        print(source_path)
+        print(name_docs)
+        print(new_name_docs)
+        print(folder_names)
+        answer = f"Ответ на ваш вопрос:\n\n{resp1['answer']}\n\n"
+        answer += "Основано на следующих документах:\n\n"
+        for doc_name, folder_name in zip(set(new_name_docs), folder_names):
+            answer += f"\nПапка:{folder_name}\nДокумент:{doc_name}"
         bot.send_message(user_id, answer)
+
         # else:
         #     bot.send_message(user_id, "Вы уже отправили боту 10 запросов за эти сутки. ")
     except ResponseError:
@@ -199,5 +215,5 @@ def handle_text_message(message):
 
     sleep(2)
 
-
+    print(resp1)
 bot.polling(none_stop=True)
