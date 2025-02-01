@@ -91,7 +91,7 @@ def create_llm_rag(user_id):
     vector_store = Chroma(
         persist_directory=chromadb_path,
         embedding_function=embeddings)
-    retriever_vanilla = vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 16, })
+    retriever_vanilla = vector_store.as_retriever(search_type="similarity",  search_kwargs={"k": 16, })
     retriever_mmr = vector_store.as_retriever(search_type="mmr", search_kwargs={"k": 16, })
 
     print(len(vector_store.get()['documents']))
@@ -185,15 +185,15 @@ def handle_text_message(message):
     q1 = message.text
 
     try:
-        if check_rate_limit(user_id, q1):
-            resp1 = rag_chain.invoke(
-                {'input': q1}, config={'configurable': {'session_id': user_id}}
-            )
+        # if check_rate_limit(user_id, q1):
+        resp1 = rag_chain.invoke(
+            {'input': q1}, config={'configurable': {'session_id': user_id}}
+        )
 
-            answer = resp1['answer']
-            bot.send_message(user_id, answer)
-        else:
-            bot.send_message(user_id, "Вы уже отправили боту 10 запросов за эти сутки. ")
+        answer = resp1['answer']
+        bot.send_message(user_id, answer)
+        # else:
+        #     bot.send_message(user_id, "Вы уже отправили боту 10 запросов за эти сутки. ")
     except ResponseError:
         bot.send_message(user_id, "Ваш запрос слишком длинный. Пожалуйста, сократите его и попробуйте снова.")
 
