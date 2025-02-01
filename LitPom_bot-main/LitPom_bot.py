@@ -15,6 +15,9 @@ from langchain_core.chat_history import BaseChatMessageHistory
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.chains import create_retrieval_chain
 from langchain_core.runnables import RunnableWithMessageHistory
+from collections import defaultdict
+from collections import Counter
+
 
 
 from config import sber, bot_token, connection_params
@@ -190,30 +193,42 @@ def handle_text_message(message):
         resp1 = rag_chain.invoke(
             {'input': q1}, config={'configurable': {'session_id': user_id}}
         )
+        def calculate_file_probabilities(resp1):
+            file_names = [os.path.basename(resp.metadata['source']) for resp in resp1['context']]
+            file_count = Counter(file_names)
+            total_files = sum(file_count.values())
+            file_probabilities = {file: count / total_files for file, count in file_count.items()}
+            return file_probabilities
+
+        probabilities = calculate_file_probabilities(resp1)
+        print("Вероятности появления каждого файла:")
+        for file, prob in probabilities.items():
+            print(f"Файл: {file}, Вероятность: {prob:.2%}")
+
         name_docs = []
         new_name_docs = []
         folder_names = []
+        docs_by_folder = defaultdict(set)
+
         for i in range(len(resp1['context'])):
             source_path = resp1['context'][i].metadata['source']
             name_docs.append(source_path)
             new_name_docs.append(os.path.splitext(os.path.basename(source_path))[0])
-            folder_names.append(os.path.basename(os.path.dirname(source_path)))
-        print(source_path)
-        print(name_docs)
-        print(new_name_docs)
-        print(folder_names)
+            folder_name = os.path.basename(os.path.dirname(source_path))
+            folder_names.append(folder_name)
+            docs_by_folder[folder_name].add(os.path.splitext(os.path.basename(source_path))[0])
         answer = f"Ответ на ваш вопрос:\n\n{resp1['answer']}\n\n"
         answer += "Основано на следующих документах:\n\n"
-        for doc_name, folder_name in zip(set(new_name_docs), folder_names):
-            answer += f"\nПапка:{folder_name}\nДокумент:{doc_name}"
+        for folder_name, docs in docs_by_folder.items():
+            answer += f"\nКатегория: {folder_name}\nДокументы:\n"
+            for doc in docs:
+                answer += f"- {doc}\n"
         bot.send_message(user_id, answer)
 
         # else:
         #     bot.send_message(user_id, "Вы уже отправили боту 10 запросов за эти сутки. ")
     except ResponseError:
         bot.send_message(user_id, "Ваш запрос слишком длинный. Пожалуйста, сократите его и попробуйте снова.")
-
-    sleep(2)
-
     print(resp1)
+    sleep(2)
 bot.polling(none_stop=True)
