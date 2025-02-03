@@ -17,10 +17,10 @@ from langchain.chains import create_retrieval_chain
 from langchain_core.runnables import RunnableWithMessageHistory
 from collections import defaultdict
 from collections import Counter
+#
+# import pyperclip
 
-import pyperclip
-
-from config import sber, bot_token, connection_params, doc_cats
+from config import sber, bot_token, connection_params
 
 user_conversations = {}
 user_llm_rag = {}
@@ -93,13 +93,13 @@ def create_llm_rag(user_id):
 
     embeddings = GigaChatEmbeddings(credentials=sber, verify_ssl_certs=False)
     user_paths = {
-        'nikitacesev': "/Users/nikitacesev/PycharmProjects/gigabot/LitPom_bot-main/chromadb_chunk_size_1200",
+        'nikitacesev': "/Users/nikitacesev/PycharmProjects/altirix_bot/LitPom_bot-main/chromadb_chunk_size_1200_3",
         'gd': "/Users/gd/PycharmProjects/gigabot/LitPom_bot-main/chromadb_chunk_size_1200"
     }
 
     current_user = os.getenv('USER')
 
-    chromadb_path = user_paths.get(current_user, "/default/path/to/chromadb")
+    chromadb_path = user_paths.get(current_user, "/Users/nikitacesev/PycharmProjects/altirix_bot/LitPom_bot-main/chromadb_chunk_size_1200_3")
 
     vector_store = Chroma(
         persist_directory=chromadb_path,
@@ -243,7 +243,7 @@ def handle_text_message(message):
         answer = f"Ответ на ваш вопрос:\n\n{resp['answer']}\n\n"
         answer += "Основано на следующих документах:\n\n"
         for folder_name, docs in user_context_info['docs_by_folder'].items():
-            answer += f"\nКатегория: {doc_cats[folder_name]}\nДокументы:\n"
+            answer += f"\nКатегория: {folder_name}\nДокументы:\n"
             for doc in docs:
                 answer += f"- {doc}\n"
         bot.send_message(user_id, answer)
