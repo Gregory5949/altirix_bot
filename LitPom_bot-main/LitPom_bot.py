@@ -18,12 +18,13 @@ from langchain_core.runnables import RunnableWithMessageHistory
 from collections import defaultdict
 from collections import Counter
 
+import pyperclip
 
-
-from config import sber, bot_token, connection_params
+from config import sber, bot_token, connection_params, doc_cats
 
 user_conversations = {}
 user_llm_rag = {}
+user_context_info = {}
 
 qa_system_prompt = '''Ты чат-бот помощник, созданный компанией Альтирикс системс. You MUST answer to questions only in Russian. Вы отвечаете только на вопросы по темам информационной безопасности, компьютерной безопасности и кибербезопасности. Если вопрос задан на другом языке или в вашем хранилище RAG нет информации для ответа, сообщите об этом пользователю. Не отвечайте на общие вопросы, такие как "Как дела?" и вопросы, заданные не на русском языке. Если вопрос связан с нормативными документами, необходимо привести фрагмент из опредленного нормативного документа, обосновывающего ответ. Ответ должен быть до 200 символов. Прежде чем ответить, проанализируйте запрос и определите его тематическую область.
 Контекст: {context}
@@ -91,11 +92,19 @@ def create_llm_rag(user_id):
                    )
 
     embeddings = GigaChatEmbeddings(credentials=sber, verify_ssl_certs=False)
-    chromadb_path = "/Users/nikitacesev/PycharmProjects/altirix_bot/LitPom_bot-main/chromadb_chunk_size_1200"
+    user_paths = {
+        'nikitacesev': "/Users/nikitacesev/PycharmProjects/gigabot/LitPom_bot-main/chromadb_chunk_size_1200",
+        'gd': "/Users/gd/PycharmProjects/gigabot/LitPom_bot-main/chromadb_chunk_size_1200"
+    }
+
+    current_user = os.getenv('USER')
+
+    chromadb_path = user_paths.get(current_user, "/default/path/to/chromadb")
+
     vector_store = Chroma(
         persist_directory=chromadb_path,
         embedding_function=embeddings)
-    retriever_vanilla = vector_store.as_retriever(search_type="similarity",  search_kwargs={"k": 16, })
+    retriever_vanilla = vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 16, })
     retriever_mmr = vector_store.as_retriever(search_type="mmr", search_kwargs={"k": 16, })
 
     print(len(vector_store.get()['documents']))
@@ -173,12 +182,24 @@ def not_text(message):
     bot.send_message(user_id, 'Я работаю только с текстовыми сообщениями!')
 
 
+def calculate_file_probabilities(resp1):
+    file_names = []
+    for resp in resp1['context']:
+        if 'source' in resp.metadata:
+            file_names.append(os.path.basename(resp.metadata['source']))
+    file_count = Counter(file_names)
+    total_files = sum(file_count.values())
+    file_probabilities = {file: count / total_files for file, count in file_count.items()}
+    return file_probabilities
+
+
 @bot.message_handler(content_types=['text'])
 def handle_text_message(message):
     user_id = message.chat.id
 
     if user_id not in user_conversations:
         user_conversations[user_id] = ChatMessageHistory()
+
 
     if user_id not in user_llm_rag:
         user_llm_rag[user_id] = create_llm_rag(user_id)
@@ -190,37 +211,39 @@ def handle_text_message(message):
 
     try:
         # if check_rate_limit(user_id, q1):
-        resp1 = rag_chain.invoke(
+        resp = rag_chain.invoke(
             {'input': q1}, config={'configurable': {'session_id': user_id}}
         )
-        def calculate_file_probabilities(resp1):
-            file_names = [os.path.basename(resp.metadata['source']) for resp in resp1['context']]
-            file_count = Counter(file_names)
-            total_files = sum(file_count.values())
-            file_probabilities = {file: count / total_files for file, count in file_count.items()}
-            return file_probabilities
+        # pyperclip.copy(resp)
+        # print(resp)
 
-        probabilities = calculate_file_probabilities(resp1)
-        print("Вероятности появления каждого файла:")
-        for file, prob in probabilities.items():
-            print(f"Файл: {file}, Вероятность: {prob:.2%}")
+        # probabilities = calculate_file_probabilities(resp)
+        # print("Вероятности появления каждого файла:")
+        # for file, prob in probabilities.items():
+        #     print(f"Файл: {file}, Вероятность: {prob:.2%}")
 
-        name_docs = []
-        new_name_docs = []
-        folder_names = []
-        docs_by_folder = defaultdict(set)
+        user_context_info['name_docs'] = []
+        user_context_info['new_name_docs'] = []
+        user_context_info['folder_names'] = []
+        user_context_info['docs_by_folder'] = defaultdict(set)
+        # name_docs = []
+        # new_name_docs = []
+        # folder_names = []
+        # docs_by_folder = defaultdict(set)
 
-        for i in range(len(resp1['context'])):
-            source_path = resp1['context'][i].metadata['source']
-            name_docs.append(source_path)
-            new_name_docs.append(os.path.splitext(os.path.basename(source_path))[0])
-            folder_name = os.path.basename(os.path.dirname(source_path))
-            folder_names.append(folder_name)
-            docs_by_folder[folder_name].add(os.path.splitext(os.path.basename(source_path))[0])
-        answer = f"Ответ на ваш вопрос:\n\n{resp1['answer']}\n\n"
+        for i in range(1):
+            if 'source' in resp['context'][i].metadata:
+                source_path = resp['context'][i].metadata['source']
+                # user_context_info['name_docs'].append(source_path)
+                # user_context_info['new_name_docs'].append(os.path.splitext(os.path.basename(source_path))[0])
+                folder_name = os.path.basename(os.path.dirname(source_path))
+                # user_context_info['folder_names'].append(folder_name)
+                user_context_info['docs_by_folder'][folder_name].add(os.path.splitext(os.path.basename(source_path))[0])
+
+        answer = f"Ответ на ваш вопрос:\n\n{resp['answer']}\n\n"
         answer += "Основано на следующих документах:\n\n"
-        for folder_name, docs in docs_by_folder.items():
-            answer += f"\nКатегория: {folder_name}\nДокументы:\n"
+        for folder_name, docs in user_context_info['docs_by_folder'].items():
+            answer += f"\nКатегория: {doc_cats[folder_name]}\nДокументы:\n"
             for doc in docs:
                 answer += f"- {doc}\n"
         bot.send_message(user_id, answer)
@@ -229,6 +252,8 @@ def handle_text_message(message):
         #     bot.send_message(user_id, "Вы уже отправили боту 10 запросов за эти сутки. ")
     except ResponseError:
         bot.send_message(user_id, "Ваш запрос слишком длинный. Пожалуйста, сократите его и попробуйте снова.")
-    print(resp1)
+    # print(resp)
     sleep(2)
+
+
 bot.polling(none_stop=True)
