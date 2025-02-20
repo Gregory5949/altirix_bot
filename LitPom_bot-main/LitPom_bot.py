@@ -282,6 +282,7 @@ def handle_text_message(message):
         user_context_info['folder_names'] = []
         user_context_info['docs_by_folder'] = defaultdict(set)
 
+
         if resp['answer'] == 'NO_ANSWER' or len(resp['context']) == 0:
             answer = 'Не основано на документах'
         else:
