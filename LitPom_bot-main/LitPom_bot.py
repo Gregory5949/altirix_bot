@@ -128,8 +128,8 @@ def create_llm_rag(user_id):
     embeddings = GigaChatEmbeddings(credentials=sber, verify_ssl_certs=False)
     user_paths = {
         'nikitacesev': "/Users/nikitacesev/PycharmProjects/altirix_bot/LitPom_bot-main/chromadb_chunk_size_1200_3",
-        # 'gd': "/Users/gd/PycharmProjects/altirix_bot/LitPom_bot-main/chromadb_chunk_size_1200_cleaned"
         'gd': "/Users/gd/PycharmProjects/altirix_bot/LitPom_bot-main/chromadb_chunk_size_1200_cleaned_3"
+        # 'gd': "/Users/gd/PycharmProjects/altirix_bot/LitPom_bot-main/chromadb_chunk_size_1200_cosine"
 
     }
 
@@ -137,7 +137,7 @@ def create_llm_rag(user_id):
 
     chromadb_path = user_paths.get(current_user,
                                    "/Users/nikitacesev/PycharmProjects/altirix_bot/LitPom_bot-main/chromadb_chunk_size_1200_3")
-
+    print(chromadb_path)
     vector_store = Chroma(
         persist_directory=chromadb_path,
         embedding_function=embeddings)
@@ -156,13 +156,25 @@ def create_llm_rag(user_id):
     )
 
     # history_aware_retriever = create_history_aware_retriever(
-    #     llm, ensemble_retriever, contextualize_q_prompt
+    #     llm, retriever, contextualize_q_prompt
     # )
 
     rag_chain = create_rag_chain(llm, retriever)
 
     conversation_chain = create_conversation_chain(user_id, llm)
     return (vector_store, retriever, llm, rag_chain, conversation_chain)
+
+from langchain.callbacks.base import BaseCallbackHandler
+
+class FinishReasonCallbackHandler(BaseCallbackHandler):
+    def __init__(self):
+        super().__init__()
+        self.finish_reason = None
+
+    def on_llm_end(self, response, **kwargs):
+        chat_generation = response.generations[0][0]
+        self.finish_reason = chat_generation.message.response_metadata.get("finish_reason")
+        print("Finish reason:", self.finish_reason)
 
 
 def create_rag_chain(llm, embedding_retriever):
@@ -273,35 +285,47 @@ def handle_text_message(message):
         init_resp = llm_checker.invoke(
             f'Относится ли вопрос: {q1} к информационной безопасности? Отвечай только да или нет')
 
-        bot.send_message(user_id, init_resp.content)
+        callback_handler = FinishReasonCallbackHandler()
+        # bot.send_message(user_id, init_resp.content)
         resp = rag_chain.invoke(
-            {'input': q1}, config={'configurable': {'session_id': user_id}}
+            {'input': q1}, config={"callbacks": [callback_handler], 'configurable': {'session_id': user_id}}
         )
+
+
         user_context_info['name_docs'] = []
         user_context_info['new_name_docs'] = []
         user_context_info['folder_names'] = []
         user_context_info['docs_by_folder'] = defaultdict(set)
 
 
-        if resp['answer'] == 'NO_ANSWER' or len(resp['context']) == 0:
+        if callback_handler.finish_reason == 'blacklist':
+            answer = "Ваш запрос не может быть обработан, так как он относится к категории, которая ограничена политикой модели"
+
+        elif resp['answer'] == 'NO_ANSWER' or len(resp['context']) == 0:
             answer = 'Не основано на документах'
         else:
-            for i in range(1):
-                if 'source' in resp['context'][i].metadata:
-                    source_path = resp['context'][i].metadata['source']
-                    # user_context_info['name_docs'].append(source_path)
-                    # user_context_info['new_name_docs'].append(os.path.splitext(os.path.basename(source_path))[0])
-                    folder_name = os.path.basename(os.path.dirname(source_path))
-                    # user_context_info['folder_names'].append(folder_name)
-                    user_context_info['docs_by_folder'][folder_name].add(
-                        os.path.splitext(os.path.basename(source_path))[0])
+            if init_resp.content.lower() in ['нет.', 'нет']:
+                answer = 'Не основано на документах'
+            else:
+                for i in range(1):
+                    if 'source' in resp['context'][i].metadata:
+                        source_path = resp['context'][i].metadata['source']
+                        # user_context_info['name_docs'].append(source_path)
+                        # user_context_info['new_name_docs'].append(os.path.splitext(os.path.basename(source_path))[0])
+                        folder_name = os.path.basename(os.path.dirname(source_path))
+                        # user_context_info['folder_names'].append(folder_name)
+                        user_context_info['docs_by_folder'][folder_name].add(
+                            os.path.splitext(os.path.basename(source_path))[0])
 
-            answer = f"Ответ на ваш вопрос:\n\n{resp['answer']}\n\n"
-            answer += "Основано на следующих документах:\n\n"
-            for folder_name, docs in user_context_info['docs_by_folder'].items():
-                answer += f"\nКатегория: {folder_name}\nДокументы:\n"
-                for doc in docs:
-                    answer += f"- {doc}\n"
+                answer = f"Ответ на ваш вопрос:\n\n{resp['answer']}\n\n"
+                answer += "Основано на следующих документах:\n\n"
+                for folder_name, docs in user_context_info['docs_by_folder'].items():
+                    answer += f"\nКатегория: {folder_name}\nДокументы:\n"
+                    for doc in docs:
+                        print(doc)
+                        answer += f"- {doc}\n"
+
+
 
         bot.send_message(user_id, answer)
     #     # else:
