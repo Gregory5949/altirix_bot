@@ -118,6 +118,7 @@ def clear_history(message: types.Message):
         bot.send_message(user_id, "История сообщений уже пуста.")
 
 
+
 def create_llm_rag(user_id):
     llm = GigaChat(credentials=sber,
                    model='GigaChat:latest',
