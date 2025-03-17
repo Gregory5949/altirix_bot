@@ -517,17 +517,20 @@ def create_conversation_chain(user_id, llm):
 
 category_to_path = {
         "Нормативные акты ФСТЭК": "/Users/gd/PycharmProjects/altirix_systems_chatbot/chromadb_chunk_size_1200_fstek_cosine",
+        "Приказы ФСБ": "/Users/gd/PycharmProjects/altirix_systems_chatbot/chromadb_chunk_size_1200_fsb_cos",
         "Федеральные законы": "/Users/gd/PycharmProjects/altirix_systems_chatbot/chromadb_chunk_size_1200_fz_cosine",
         "Национальные стандарты РФ": "/Users/gd/PycharmProjects/altirix_systems_chatbot/chromadb_chunk_size_1200_prikaz_cb_rf_cosine",
         "Приказы ЦБ РФ": "/Users/gd/PycharmProjects/altirix_systems_chatbot/chromadb_chunk_size_1200_prikaz_cb_rf_cosine",
         "Постановления Правительства РФ": "/Users/gd/PycharmProjects/altirix_systems_chatbot/chromadb_chunk_size_1200_statement_gov_rf_cosine",
         "Указы Президента РФ": "/Users/gd/PycharmProjects/altirix_systems_chatbot/chromadb_chunk_size_1200_ukazy_prez_cosine",
-        "Сваи": "/Users/gd/PycharmProjects/project_svai/chromadb_svai_structured",
+        "Общие вопросы по ИБ": "/Users/gd/PycharmProjects/altirix_bot/LitPom_bot-main/chromadb_chunk_size_1200_kaspersky_encycl_cos",
     }
+
+
 
 def create_llm_rag(user_id, category=None):
     llm = GigaChat(credentials=sber,
-                   model='GigaChat:latest',
+                   model='GigaChat-2-Max:latest',
                    verify_ssl_certs=False,
                    profanity_check=False,
                    )
@@ -617,12 +620,13 @@ async def clear_history_command(message: types.Message):
 async def categories_command(message: types.Message, state: FSMContext):
     categories = [
         "Нормативные акты ФСТЭК",
+        "Приказы ФСБ"
         "Федеральные законы",
         "Национальные стандарты РФ",
         "Приказы ЦБ РФ",
         "Постановления Правительства РФ",
         "Указы Президента РФ",
-        "Сваи",
+        "Общие вопросы по ИБ",
     ]
 
     # Create a list of KeyboardButton objects
@@ -681,14 +685,14 @@ async def handle_text_message(message: types.Message, state: FSMContext):
 
 
         # If a category is selected, dynamically generate the prompt
-        # if selected_category:
-        #     prompt = f'Относится ли вопрос: {q1} к {selected_category}? Отвечай только да или нет.'
-        #     init_resp = llm_checker.invoke(prompt)
-        # #
-        # #     # If the question is not related to the selected category, respond accordingly
-        #     if init_resp.content.lower() in ['нет.', 'нет']:
-        #         await message.answer("Ваш вопрос не относится к выбранной категории.")
-        #         return
+        if selected_category:
+            prompt = f'Относится ли вопрос: {q1} к {selected_category}? Отвечай только да или нет.'
+            init_resp = llm_checker.invoke(prompt)
+        #
+        #     # If the question is not related to the selected category, respond accordingly
+            if init_resp.content.lower() in ['нет.', 'нет']:
+                await message.answer("Ваш вопрос не относится к выбранной категории.")
+                return
 
         # Proceed with the RAG pipeline
         callback_handler = FinishReasonCallbackHandler()
