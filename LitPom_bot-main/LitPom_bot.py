@@ -39,6 +39,7 @@ class FinishReasonCallbackHandler(BaseCallbackHandler):
 class CategorySelection(StatesGroup):
     waiting_for_category = State()
     waiting_for_question = State()
+    waiting_for_continue = State()
 
 
 user_conversations = {}
@@ -127,14 +128,14 @@ def create_conversation_chain(llm):
 
 
 category_to_path = {
-    "Нормативные акты ФСТЭК": "/Users/gd/PycharmProjects/altirix_systems_chatbot/chromadb_chunk_size_1200_fstek_cosine",
-    "Приказы ФСБ": "/Users/gd/PycharmProjects/altirix_systems_chatbot/chromadb_chunk_size_1200_fsb_cos",
-    "Федеральные законы": "/Users/gd/PycharmProjects/altirix_systems_chatbot/chromadb_chunk_size_1200_fz_cosine",
-    "Национальные стандарты РФ": "/Users/gd/PycharmProjects/altirix_systems_chatbot/chromadb_chunk_size_1200_prikaz_cb_rf_cosine",
-    "Приказы ЦБ РФ": "/Users/gd/PycharmProjects/altirix_systems_chatbot/chromadb_chunk_size_1200_prikaz_cb_rf_cosine",
-    "Постановления Правительства РФ": "/Users/gd/PycharmProjects/altirix_systems_chatbot/chromadb_chunk_size_1200_statement_gov_rf_cosine",
-    "Указы Президента РФ": "/Users/gd/PycharmProjects/altirix_systems_chatbot/chromadb_chunk_size_1200_ukazy_prez_cosine",
-    "Общие вопросы по ИБ": "/Users/gd/PycharmProjects/altirix_bot/LitPom_bot-main/chromadb_chunk_size_1200_kaspersky_encycl_cos",
+    "Нормативные акты ФСТЭК": "/Users/nikitacesev/PycharmProjects/altirix_bot1/LitPom_bot-main/chromadb_chunk_size_1200_fstek_cosine",
+    "Приказы ФСБ": "/Users/nikitacesev/PycharmProjects/altirix_bot1/LitPom_bot-main/chromadb_chunk_size_1200_fsb_cos",
+    "Федеральные законы": "/Users/nikitacesev/PycharmProjects/altirix_bot1/LitPom_bot-main/chromadb_chunk_size_1200_fz_cosine",
+    "Национальные стандарты РФ": "/Users/nikitacesev/PycharmProjects/altirix_bot1/LitPom_bot-main/chromadb_chunk_size_1200_nation_std_rf_cosine",
+    "Приказы ЦБ РФ": "/Users/nikitacesev/PycharmProjects/altirix_bot1/LitPom_bot-main/chromadb_chunk_size_1200_prikaz_cb_rf_cosine",
+    "Постановления Правительства РФ": "/Users/nikitacesev/PycharmProjects/altirix_bot1/LitPom_bot-main/chromadb_chunk_size_1200_statement_gov_rf_cosine",
+    "Указы Президента РФ": "/Users/nikitacesev/PycharmProjects/altirix_bot1/LitPom_bot-main/chromadb_chunk_size_1200_ukazy_prez_cosine",
+    "Общие вопросы по ИБ": "/Users/nikitacesev/PycharmProjects/altirix_bot1/LitPom_bot-main/chromadb_chunk_size_1200_kaspersky_encycl_cos",
 }
 
 
@@ -199,7 +200,7 @@ def create_llm_rag(user_id, category=None):
     rag_chain = create_rag_chain(llm, history_aware_retriever, qa_prompt)
     rag_chain_checker = create_rag_chain(llm_checker, history_aware_retriever, qa_prompt_checker)
 
-    conversation_chain = create_conversation_chain(user_id, llm)
+    conversation_chain = create_conversation_chain(llm)
     return vector_store, history_aware_retriever, llm, rag_chain, rag_chain_checker, conversation_chain
 
 
@@ -323,7 +324,7 @@ async def handle_text_message(message: types.Message, state: FSMContext):
         resp = await rag_chain.ainvoke(
             {'input': q1}, config={"callbacks": [callback_handler], 'configurable': {'session_id': user_id}}
         )
-        user_context_info['name_docs'] = []
+        user_context_info['name_docs'] = set()
         user_context_info['new_name_docs'] = []
         user_context_info['folder_names'] = []
         user_context_info['docs_by_folder'] = defaultdict(set)
@@ -333,24 +334,46 @@ async def handle_text_message(message: types.Message, state: FSMContext):
         elif len(resp['context']) == 0 or resp['answer'] == 'NO_ANSWER':
             answer = 'Не основано на документах'
         else:
-            for i in range(1):
-                if 'source' in resp['context'][i].metadata:
-                    source_path = resp['context'][i].metadata['source']
-                    folder_name = os.path.basename(os.path.dirname(source_path))
-                    user_context_info['docs_by_folder'][folder_name].add(
-                        os.path.splitext(os.path.basename(source_path))[0])
-                answer = f"Ответ на ваш вопрос:\n\n{resp['answer']}\n\n"
+            for chunk in resp['context']:
+                if 'source' in chunk.metadata:
+                    source_path = chunk.metadata['source']
+                    doc_name = os.path.splitext(os.path.basename(source_path))[0]
+                    user_context_info['name_docs'].add(doc_name)
+            answer = f"Ответ на ваш вопрос:\n\n{resp['answer']}\n\n"
+            if user_context_info['name_docs']:
                 answer += "Основано на следующих документах:\n\n"
-                for folder_name, docs in user_context_info['docs_by_folder'].items():
-                    answer += f"\nКатегория: {folder_name}\nДокументы:\n"
-                    for doc in docs:
-                        answer += f"- {doc}\n"
+                for doc in sorted(user_context_info['name_docs']):
+                    answer += f"- {doc}\n"
+            else:
+                answer += "Не удалось определить документы.\n"
 
         await message.answer(answer)
+
+        markup = ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="Остаться в категории"), KeyboardButton(text="Выбрать другую категорию")]
+            ],
+            resize_keyboard=True,
+            one_time_keyboard=True
+        )
+        await state.set_state(CategorySelection.waiting_for_continue)
+        await message.answer("Хотите остаться в этой категории или выбрать другую?", reply_markup=markup)
+
     except ResponseError as ex:
         print(ex)
         await message.answer("Ваш запрос слишком длинный. Пожалуйста, сократите его и попробуйте снова.")
 
+@dp.message(StateFilter(CategorySelection.waiting_for_continue), F.text)
+async def handle_continue_choice(message: types.Message, state: FSMContext):
+    choice = message.text.lower()
+
+    if "остаться" in choice:
+        await state.set_state(CategorySelection.waiting_for_question)
+        await message.answer("Отлично! Задайте новый вопрос:", reply_markup=ReplyKeyboardRemove())
+    elif "категорию" in choice:
+        await categories_command(message, state)  # Возвращаем к выбору категории
+    else:
+        await message.answer("Пожалуйста, выберите один из предложенных вариантов.")
 
 @dp.message(F.text)
 async def handle_text_message(message: types.Message, state: FSMContext):
