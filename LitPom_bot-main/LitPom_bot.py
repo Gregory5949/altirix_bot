@@ -1,4 +1,5 @@
 import asyncio
+import random
 import os
 from collections import defaultdict
 
@@ -30,7 +31,7 @@ class FinishReasonCallbackHandler(BaseCallbackHandler):
         super().__init__()
         self.finish_reason = None
 
-    def on_llm_end(self, response, **kwargs):
+    async def on_llm_end(self, response, **kwargs):
         chat_generation = response.generations[0][0]
         self.finish_reason = chat_generation.message.response_metadata.get("finish_reason")
         print("Finish reason:", self.finish_reason)
@@ -45,6 +46,7 @@ class CategorySelection(StatesGroup):
 user_conversations = {}
 user_llm_rag = {}
 user_context_info = {}
+user_conversations_lock = asyncio.Lock()
 
 qa_system_prompt = '''<s> [INST] Твоя роль — отвечать на вопросы в области информационной, компьютерной и кибербезопасности. 
 Лимит сообщения: 300 символов. Используй только информацию, предоставленную в запросе. Если ты не знаешь ответ на вопрос или информация отсутствует, строго выведи NO_ANSWER и ничего больше. 
@@ -77,23 +79,25 @@ bot = Bot(token=bot_token)
 dp = Dispatcher()
 
 
-def check_rate_limit(user_id, user_message):
-    with psycopg2.connect(**connection_params) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute("""
-                SELECT COUNT(*) FROM request_logs 
-                WHERE user_id = %s AND created_at >= NOW() - INTERVAL '1 day';
-            """, (user_id,))
 
-            count = cursor.fetchone()[0]
-
-            if count >= 10:
-                return False
-            else:
-                cursor.execute("INSERT INTO request_logs (user_id, user_message) VALUES (%s, %s);",
-                               (user_id, user_message))
-                connection.commit()
-                return True
+async def check_rate_limit(user_id, user_message):
+    loop = asyncio.get_running_loop()
+    def db_operation():
+        with psycopg2.connect(**connection_params) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    SELECT COUNT(*) FROM request_logs 
+                    WHERE user_id = %s AND created_at >= NOW() - INTERVAL '1 day';
+                """, (user_id,))
+                count = cursor.fetchone()[0]
+                if count >= 10:
+                    return False
+                else:
+                    cursor.execute("INSERT INTO request_logs (user_id, user_message) VALUES (%s, %s);",
+                                   (user_id, user_message))
+                    connection.commit()
+                    return True
+    return await loop.run_in_executor(None, db_operation)
 
 
 def get_session_history(session_id: str) -> BaseChatMessageHistory:
@@ -139,7 +143,7 @@ category_to_path = {
 }
 
 
-def create_llm_rag(user_id, category=None):
+async def create_llm_rag(user_id, category=None):
     llm = GigaChat(credentials=sber,
                    model='GigaChat-2:latest',
                    verify_ssl_certs=False,
@@ -166,16 +170,18 @@ def create_llm_rag(user_id, category=None):
     else:
         chromadb_path = category_to_path[category]
 
-    vector_store = Chroma(
+    vector_store = await asyncio.to_thread(
+        Chroma,
         persist_directory=chromadb_path,
         embedding_function=embeddings
     )
 
     retriever = vector_store.as_retriever(
-        search_type="similarity_score_threshold", search_kwargs={"score_threshold": 0.7, "k": 4}
+        search_type="similarity_score_threshold", search_kwargs={"score_threshold": 0.6, "k": 4}
     )
 
-    history_aware_retriever = create_history_aware_retriever(
+    history_aware_retriever = await asyncio.to_thread(
+        create_history_aware_retriever,
         llm, retriever, contextualize_q_prompt
     )
 
@@ -197,10 +203,20 @@ def create_llm_rag(user_id, category=None):
         ]
     )
 
-    rag_chain = create_rag_chain(llm, history_aware_retriever, qa_prompt)
-    rag_chain_checker = create_rag_chain(llm_checker, history_aware_retriever, qa_prompt_checker)
+    rag_chain = await asyncio.to_thread(
+        create_rag_chain,
+        llm, history_aware_retriever, qa_prompt
+    )
+    rag_chain_checker = await asyncio.to_thread(
+        create_rag_chain,
+        llm_checker, history_aware_retriever, qa_prompt_checker
+    )
 
-    conversation_chain = create_conversation_chain(llm)
+    conversation_chain = await asyncio.to_thread(
+        create_conversation_chain,
+        llm
+    )
+
     return vector_store, history_aware_retriever, llm, rag_chain, rag_chain_checker, conversation_chain
 
 
@@ -208,11 +224,13 @@ def create_llm_rag(user_id, category=None):
 async def start_command(message: types.Message):
     user_id = message.chat.id
 
-    if user_id not in user_conversations:
-        user_conversations[user_id] = ChatMessageHistory()
+    async with user_conversations_lock:
+        if user_id not in user_conversations:
+            user_conversations[user_id] = ChatMessageHistory()
 
-    if user_id not in user_llm_rag:
-        user_llm_rag[user_id] = create_llm_rag(user_id)
+        if user_id not in user_llm_rag:
+            user_llm_rag[user_id] = await create_llm_rag(user_id)
+
 
     vdb, embedding_retriever, llm, rag_chain, conversation = user_llm_rag[user_id]
     conversation.memory = user_conversations[user_id]
@@ -227,11 +245,12 @@ async def start_command(message: types.Message):
 async def clear_history_button(message: types.Message):
     user_id = message.chat.id
 
-    if user_id in user_conversations:
-        user_conversations[user_id].clear()
-        await message.answer("История сообщений очищена.", reply_markup=ReplyKeyboardRemove())
-    else:
-        await message.answer("История сообщений уже пуста.", reply_markup=ReplyKeyboardRemove())
+    async with user_conversations_lock:
+        if user_id in user_conversations:
+            user_conversations[user_id].clear()
+            await message.answer("История сообщений очищена.", reply_markup=ReplyKeyboardRemove())
+        else:
+            await message.answer("История сообщений уже пуста.", reply_markup=ReplyKeyboardRemove())
 
 
 @dp.message(Command("help"))
@@ -243,11 +262,12 @@ async def help_command(message: types.Message):
 async def clear_history_command(message: types.Message):
     user_id = message.chat.id
 
-    if user_id in user_conversations:
-        user_conversations[user_id].clear()
-        await message.answer("История сообщений очищена.")
-    else:
-        await message.answer("История сообщений уже пуста.")
+    async with user_conversations_lock:
+        if user_id in user_conversations:
+            user_conversations[user_id].clear()
+            await message.answer("История сообщений очищена.")
+        else:
+            await message.answer("История сообщений уже пуста.")
 
 
 @dp.message(Command("categories"))
@@ -282,22 +302,45 @@ async def handle_category_selection(message: types.Message, state: FSMContext):
     await state.update_data(selected_category=selected_category)
 
     user_id = message.chat.id
-    user_llm_rag[user_id] = create_llm_rag(user_id, selected_category)
+    user_llm_rag[user_id] = await create_llm_rag(user_id, selected_category)
     print(selected_category)
 
     await state.set_state(CategorySelection.waiting_for_question)
     await message.answer(f"Вы выбрали категорию: {selected_category}. Теперь задайте ваш вопрос:")
 
+# Ограничиваем количество параллельных запросов
+semaphore = asyncio.Semaphore(5)
+
+async def send_request_with_retry(rag_chain, input_data, config):
+    max_retries = 5
+    base_delay = 1  # Начальная задержка в секундах
+
+    for attempt in range(max_retries):
+        try:
+            async with semaphore:
+                # Задержка для соблюдения лимита
+                await asyncio.sleep(base_delay * (2 ** attempt) + random.uniform(0, 1))
+                # Отправляем запрос
+                response = await rag_chain.ainvoke(input_data, config)
+                return response
+        except Exception as e:
+            if "429" in str(e):
+                print(f"Ошибка 429. Попытка {attempt + 1} из {max_retries}.")
+                continue
+            else:
+                raise e
+    raise Exception("Превышено количество попыток")
 
 @dp.message(StateFilter(CategorySelection.waiting_for_question), F.text)
 async def handle_text_message(message: types.Message, state: FSMContext):
     user_id = message.chat.id
 
-    if user_id not in user_conversations:
-        user_conversations[user_id] = ChatMessageHistory()
+    async with user_conversations_lock:
+        if user_id not in user_conversations:
+            user_conversations[user_id] = ChatMessageHistory()
 
-    if user_id not in user_llm_rag:
-        user_llm_rag[user_id] = create_llm_rag(user_id)
+        if user_id not in user_llm_rag:
+            user_llm_rag[user_id] = await create_llm_rag(user_id)
 
     vdb, embedding_retriever, llm, rag_chain, rag_chain_checker, conversation = user_llm_rag[user_id]
     conversation.memory = user_conversations[user_id]
@@ -312,7 +355,8 @@ async def handle_text_message(message: types.Message, state: FSMContext):
 
         is_question_belongs2sel_cat = True
         if selected_category:
-            init_resp = await rag_chain_checker.ainvoke(
+            init_resp = await send_request_with_retry(
+                rag_chain_checker,  # Передаём rag_chain_checker
                 {'input': q1}, config={"callbacks": [callback_handler], 'configurable': {'session_id': user_id}}
             )
 
@@ -321,7 +365,8 @@ async def handle_text_message(message: types.Message, state: FSMContext):
                 await message.answer("Ваш вопрос не относится к выбранной категории.")
                 return
 
-        resp = await rag_chain.ainvoke(
+        resp = await send_request_with_retry(
+            rag_chain,  # Передаём rag_chain
             {'input': q1}, config={"callbacks": [callback_handler], 'configurable': {'session_id': user_id}}
         )
         user_context_info['name_docs'] = set()
