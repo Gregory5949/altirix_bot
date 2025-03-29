@@ -1,8 +1,7 @@
 import asyncio
-import random
 import os
 from collections import defaultdict
-
+import nltk
 import psycopg2
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, StateFilter
@@ -21,9 +20,11 @@ from langchain_chroma import Chroma
 from langchain_core.chat_history import BaseChatMessageHistory
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables import RunnableWithMessageHistory
+from nltk import SnowballStemmer
 
 from config import bot_token, connection_params, sber
 from langchain.callbacks.base import BaseCallbackHandler
+import yake
 
 
 class FinishReasonCallbackHandler(BaseCallbackHandler):
@@ -31,7 +32,7 @@ class FinishReasonCallbackHandler(BaseCallbackHandler):
         super().__init__()
         self.finish_reason = None
 
-    async def on_llm_end(self, response, **kwargs):
+    def on_llm_end(self, response, **kwargs):
         chat_generation = response.generations[0][0]
         self.finish_reason = chat_generation.message.response_metadata.get("finish_reason")
         print("Finish reason:", self.finish_reason)
@@ -40,19 +41,18 @@ class FinishReasonCallbackHandler(BaseCallbackHandler):
 class CategorySelection(StatesGroup):
     waiting_for_category = State()
     waiting_for_question = State()
-    waiting_for_continue = State()
 
 
 user_conversations = {}
 user_llm_rag = {}
 user_context_info = {}
-user_conversations_lock = asyncio.Lock()
 
-qa_system_prompt = '''<s> [INST] Твоя роль — отвечать на вопросы в области информационной, компьютерной и кибербезопасности. 
-Лимит сообщения: 300 символов. Используй только информацию, предоставленную в запросе. Если ты не знаешь ответ на вопрос или информация отсутствует, строго выведи NO_ANSWER и ничего больше. 
+qa_system_prompt = '''<s> [INST] Твоя роль — отвечать на вопросы в области информационной, компьютерной и кибербезопасности, используя точные формулировки из предоставленного контекста. 
+Лимит ответа: 300 символов. Отвечай кратко. Если ты не знаешь ответ на вопрос или информация отсутствует, выведи NO_ANSWER и ничего больше. 
 Никогда не используй слово "контекст" или любые его производные (например, "на основе контекста", "из контекста" и т.д.). Будь внимателен к деталям, четко следуй инструкциям и формулируй ответы так, как будто информация исходит от тебя. </s> [/INST]
 Вопрос: {input} 
-Контекст: {context}'''
+Контекст: {context}
+'''
 
 qa_prompt = ChatPromptTemplate.from_messages(
     [
@@ -79,25 +79,23 @@ bot = Bot(token=bot_token)
 dp = Dispatcher()
 
 
+def check_rate_limit(user_id, user_message):
+    with psycopg2.connect(**connection_params) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT COUNT(*) FROM request_logs 
+                WHERE user_id = %s AND created_at >= NOW() - INTERVAL '1 day';
+            """, (user_id,))
 
-async def check_rate_limit(user_id, user_message):
-    loop = asyncio.get_running_loop()
-    def db_operation():
-        with psycopg2.connect(**connection_params) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute("""
-                    SELECT COUNT(*) FROM request_logs 
-                    WHERE user_id = %s AND created_at >= NOW() - INTERVAL '1 day';
-                """, (user_id,))
-                count = cursor.fetchone()[0]
-                if count >= 10:
-                    return False
-                else:
-                    cursor.execute("INSERT INTO request_logs (user_id, user_message) VALUES (%s, %s);",
-                                   (user_id, user_message))
-                    connection.commit()
-                    return True
-    return await loop.run_in_executor(None, db_operation)
+            count = cursor.fetchone()[0]
+
+            if count >= 10:
+                return False
+            else:
+                cursor.execute("INSERT INTO request_logs (user_id, user_message) VALUES (%s, %s);",
+                               (user_id, user_message))
+                connection.commit()
+                return True
 
 
 def get_session_history(session_id: str) -> BaseChatMessageHistory:
@@ -131,30 +129,37 @@ def create_conversation_chain(llm):
     return conversation
 
 
+# было: /Users/gd/PycharmProjects/altirix_systems_chatbot/chromadb_chunk_size_1200_fstek_cosine и 1900, щас 2000
+# было: /Users/gd/PycharmProjects/altirix_systems_chatbot/chromadb_chunk_size_1200_statement_gov_rf_cosine и 1900, щас 2100
+# было: /Users/gd/PycharmProjects/altirix_systems_chatbot/chromadb_chunk_size_1200_fz_cosine (в 1900 версии, файл Сравнение соглашений о поручении на обработку персональных данных и о передаче персональных данных - RPPA.pdf – 1700 чанк
+# было: /Users/gd/PycharmProjects/altirix_systems_chatbot/chromadb_chunk_size_1200_ukazy_prez_cosine, щас 2300
+# было /Users/gd/PycharmProjects/altirix_systems_chatbot/chromadb_chunk_size_1200_fsb_cos, щас 2200
+# добавидась /Users/gd/PycharmProjects/altirix_systems_chatbot/chromadb_chunk_size_2200_roskomnadzor_cosine
+# убрана "/Users/gd/PycharmProjects/altirix_systems_chatbot/chromadb_chunk_size_1200_prikaz_cb_rf_cosine"
+
 category_to_path = {
-    "Нормативные акты ФСТЭК": "/Users/nikitacesev/PycharmProjects/altirix_bot1/LitPom_bot-main/chromadb_chunk_size_1200_fstek_cosine",
-    "Приказы ФСБ": "/Users/nikitacesev/PycharmProjects/altirix_bot1/LitPom_bot-main/chromadb_chunk_size_1200_fsb_cos",
-    "Федеральные законы": "/Users/nikitacesev/PycharmProjects/altirix_bot1/LitPom_bot-main/chromadb_chunk_size_1200_fz_cosine",
-    "Национальные стандарты РФ": "/Users/nikitacesev/PycharmProjects/altirix_bot1/LitPom_bot-main/chromadb_chunk_size_1200_nation_std_rf_cosine",
-    "Приказы ЦБ РФ": "/Users/nikitacesev/PycharmProjects/altirix_bot1/LitPom_bot-main/chromadb_chunk_size_1200_prikaz_cb_rf_cosine",
-    "Постановления Правительства РФ": "/Users/nikitacesev/PycharmProjects/altirix_bot1/LitPom_bot-main/chromadb_chunk_size_1200_statement_gov_rf_cosine",
-    "Указы Президента РФ": "/Users/nikitacesev/PycharmProjects/altirix_bot1/LitPom_bot-main/chromadb_chunk_size_1200_ukazy_prez_cosine",
-    "Общие вопросы по ИБ": "/Users/nikitacesev/PycharmProjects/altirix_bot1/LitPom_bot-main/chromadb_chunk_size_1200_kaspersky_encycl_cos",
+    "Приказы ФСТЭК": "/Users/gd/PycharmProjects/altirix_systems_chatbot/chromadb_chunk_size_2000_fstek_cosine",
+    "Приказы ФСБ": "/Users/gd/PycharmProjects/altirix_systems_chatbot/chromadb_chunk_size_2200_fsb_cosine",
+    "Федеральные законы": "/Users/gd/PycharmProjects/altirix_systems_chatbot/chromadb_chunk_size_1900_fz_cosine",
+    "Приказы Роскомнадзора": "/Users/gd/PycharmProjects/altirix_systems_chatbot/chromadb_chunk_size_2200_roskomnadzor_cosine",
+    "Постановления Правительства РФ": "/Users/gd/PycharmProjects/altirix_systems_chatbot/chromadb_chunk_size_2100_statement_gov_rf_cosine",
+    "Указы Президента РФ": "/Users/gd/PycharmProjects/altirix_systems_chatbot/chromadb_chunk_size_2300_ukazy_prez_cosine",
+    "Общие вопросы по ИБ": "/Users/gd/PycharmProjects/altirix_bot/LitPom_bot-main/chromadb_chunk_size_1200_kaspersky_encycl_cos",
 }
 
 
-async def create_llm_rag(user_id, category=None):
+def create_llm_rag(user_id, category=None):
     llm = GigaChat(credentials=sber,
                    model='GigaChat-2:latest',
                    verify_ssl_certs=False,
                    profanity_check=False,
-
                    )
 
     llm_checker = GigaChat(credentials=sber,
                            model='GigaChat-2-Max:latest',
                            verify_ssl_certs=False,
                            profanity_check=False,
+                           temperature=0
                            )
 
     embeddings = GigaChatEmbeddings(credentials=sber, verify_ssl_certs=False)
@@ -170,29 +175,29 @@ async def create_llm_rag(user_id, category=None):
     else:
         chromadb_path = category_to_path[category]
 
-    vector_store = await asyncio.to_thread(
-        Chroma,
+    vector_store = Chroma(
         persist_directory=chromadb_path,
         embedding_function=embeddings
     )
+    print(len(vector_store._collection.get()['documents']))
 
     retriever = vector_store.as_retriever(
-        search_type="similarity_score_threshold", search_kwargs={"score_threshold": 0.6, "k": 4}
+        search_type="similarity_score_threshold", search_kwargs={"score_threshold": 0.7, "k": 16}
     )
 
-    history_aware_retriever = await asyncio.to_thread(
-        create_history_aware_retriever,
+    history_aware_retriever = create_history_aware_retriever(
         llm, retriever, contextualize_q_prompt
     )
 
     if category:
-        prompt = f'''<s> [INST] Относится ли заданный вопрос к категории "{category}"? 
-        Категория "{category}" включает вопросы, связанные с "{category}", их содержанием, количеством и применением.
-        Учти историю запросов пользователя и контекст. Отвечай только "да" или "нет". 
-        </s> [/INST]
 
-        Вопрос: {{input}} 
-        Контекст: {{context}}'''
+        prompt = f'''<s> [INST] Относится ли заданный запрос к категории {category}?
+                Отвечай только "да" или "нет".
+                </s> [/INST]
+                Вопрос: {{input}}
+                Контекст: {{context}}'''
+
+
     else:
         prompt = qa_system_prompt  # Default prompt if no category is selected
 
@@ -202,21 +207,12 @@ async def create_llm_rag(user_id, category=None):
             ("human", "{input}"),
         ]
     )
+    print(prompt)
 
-    rag_chain = await asyncio.to_thread(
-        create_rag_chain,
-        llm, history_aware_retriever, qa_prompt
-    )
-    rag_chain_checker = await asyncio.to_thread(
-        create_rag_chain,
-        llm_checker, history_aware_retriever, qa_prompt_checker
-    )
+    rag_chain = create_rag_chain(llm, history_aware_retriever, qa_prompt)
+    rag_chain_checker = create_rag_chain(llm_checker, history_aware_retriever, qa_prompt_checker)
 
-    conversation_chain = await asyncio.to_thread(
-        create_conversation_chain,
-        llm
-    )
-
+    conversation_chain = create_conversation_chain(llm)
     return vector_store, history_aware_retriever, llm, rag_chain, rag_chain_checker, conversation_chain
 
 
@@ -224,13 +220,11 @@ async def create_llm_rag(user_id, category=None):
 async def start_command(message: types.Message):
     user_id = message.chat.id
 
-    async with user_conversations_lock:
-        if user_id not in user_conversations:
-            user_conversations[user_id] = ChatMessageHistory()
+    if user_id not in user_conversations:
+        user_conversations[user_id] = ChatMessageHistory()
 
-        if user_id not in user_llm_rag:
-            user_llm_rag[user_id] = await create_llm_rag(user_id)
-
+    if user_id not in user_llm_rag:
+        user_llm_rag[user_id] = create_llm_rag(user_id)
 
     vdb, embedding_retriever, llm, rag_chain, conversation = user_llm_rag[user_id]
     conversation.memory = user_conversations[user_id]
@@ -245,12 +239,11 @@ async def start_command(message: types.Message):
 async def clear_history_button(message: types.Message):
     user_id = message.chat.id
 
-    async with user_conversations_lock:
-        if user_id in user_conversations:
-            user_conversations[user_id].clear()
-            await message.answer("История сообщений очищена.", reply_markup=ReplyKeyboardRemove())
-        else:
-            await message.answer("История сообщений уже пуста.", reply_markup=ReplyKeyboardRemove())
+    if user_id in user_conversations:
+        user_conversations[user_id].clear()
+        await message.answer("История сообщений очищена.", reply_markup=ReplyKeyboardRemove())
+    else:
+        await message.answer("История сообщений уже пуста.", reply_markup=ReplyKeyboardRemove())
 
 
 @dp.message(Command("help"))
@@ -262,22 +255,20 @@ async def help_command(message: types.Message):
 async def clear_history_command(message: types.Message):
     user_id = message.chat.id
 
-    async with user_conversations_lock:
-        if user_id in user_conversations:
-            user_conversations[user_id].clear()
-            await message.answer("История сообщений очищена.")
-        else:
-            await message.answer("История сообщений уже пуста.")
+    if user_id in user_conversations:
+        user_conversations[user_id].clear()
+        await message.answer("История сообщений очищена.")
+    else:
+        await message.answer("История сообщений уже пуста.")
 
 
 @dp.message(Command("categories"))
 async def categories_command(message: types.Message, state: FSMContext):
     categories = [
-        "Нормативные акты ФСТЭК",
+        "Приказы ФСТЭК",
         "Приказы ФСБ",
         "Федеральные законы",
-        "Национальные стандарты РФ",
-        "Приказы ЦБ РФ",
+        "Приказы Роскомнадзора",
         "Постановления Правительства РФ",
         "Указы Президента РФ",
         "Общие вопросы по ИБ",
@@ -302,50 +293,33 @@ async def handle_category_selection(message: types.Message, state: FSMContext):
     await state.update_data(selected_category=selected_category)
 
     user_id = message.chat.id
-    user_llm_rag[user_id] = await create_llm_rag(user_id, selected_category)
+    user_llm_rag[user_id] = create_llm_rag(user_id, selected_category)
     print(selected_category)
 
     await state.set_state(CategorySelection.waiting_for_question)
     await message.answer(f"Вы выбрали категорию: {selected_category}. Теперь задайте ваш вопрос:")
 
-# Ограничиваем количество параллельных запросов
-semaphore = asyncio.Semaphore(5)
-
-async def send_request_with_retry(rag_chain, input_data, config):
-    max_retries = 5
-    base_delay = 1  # Начальная задержка в секундах
-
-    for attempt in range(max_retries):
-        try:
-            async with semaphore:
-                # Задержка для соблюдения лимита
-                await asyncio.sleep(base_delay * (2 ** attempt) + random.uniform(0, 1))
-                # Отправляем запрос
-                response = await rag_chain.ainvoke(input_data, config)
-                return response
-        except Exception as e:
-            if "429" in str(e):
-                print(f"Ошибка 429. Попытка {attempt + 1} из {max_retries}.")
-                continue
-            else:
-                raise e
-    raise Exception("Превышено количество попыток")
 
 @dp.message(StateFilter(CategorySelection.waiting_for_question), F.text)
 async def handle_text_message(message: types.Message, state: FSMContext):
     user_id = message.chat.id
 
-    async with user_conversations_lock:
-        if user_id not in user_conversations:
-            user_conversations[user_id] = ChatMessageHistory()
+    if user_id not in user_conversations:
+        user_conversations[user_id] = ChatMessageHistory()
 
-        if user_id not in user_llm_rag:
-            user_llm_rag[user_id] = await create_llm_rag(user_id)
+    if user_id not in user_llm_rag:
+        user_llm_rag[user_id] = create_llm_rag(user_id)
 
     vdb, embedding_retriever, llm, rag_chain, rag_chain_checker, conversation = user_llm_rag[user_id]
     conversation.memory = user_conversations[user_id]
 
     q1 = message.text
+
+    from nltk.corpus import stopwords
+    nltk.download('stopwords')
+
+
+
 
     try:
         data = await state.get_data()
@@ -353,23 +327,20 @@ async def handle_text_message(message: types.Message, state: FSMContext):
 
         callback_handler = FinishReasonCallbackHandler()
 
-        is_question_belongs2sel_cat = True
         if selected_category:
-            init_resp = await send_request_with_retry(
-                rag_chain_checker,  # Передаём rag_chain_checker
-                {'input': q1}, config={"callbacks": [callback_handler], 'configurable': {'session_id': user_id}}
+            init_resp = await rag_chain_checker.ainvoke(
+                {'input': q1},
+                config={"callbacks": [callback_handler], 'configurable': {'session_id': user_id}}
             )
 
             if init_resp['answer'].lower() in ['нет.', 'нет']:
-                is_question_belongs2sel_cat = False
                 await message.answer("Ваш вопрос не относится к выбранной категории.")
                 return
 
-        resp = await send_request_with_retry(
-            rag_chain,  # Передаём rag_chain
+        resp = await rag_chain.ainvoke(
             {'input': q1}, config={"callbacks": [callback_handler], 'configurable': {'session_id': user_id}}
         )
-        user_context_info['name_docs'] = set()
+        user_context_info['name_docs'] = []
         user_context_info['new_name_docs'] = []
         user_context_info['folder_names'] = []
         user_context_info['docs_by_folder'] = defaultdict(set)
@@ -379,46 +350,24 @@ async def handle_text_message(message: types.Message, state: FSMContext):
         elif len(resp['context']) == 0 or resp['answer'] == 'NO_ANSWER':
             answer = 'Не основано на документах'
         else:
-            for chunk in resp['context']:
-                if 'source' in chunk.metadata:
-                    source_path = chunk.metadata['source']
-                    doc_name = os.path.splitext(os.path.basename(source_path))[0]
-                    user_context_info['name_docs'].add(doc_name)
-            answer = f"Ответ на ваш вопрос:\n\n{resp['answer']}\n\n"
-            if user_context_info['name_docs']:
+            for i in range(1):
+                if 'source' in resp['context'][i].metadata:
+                    source_path = resp['context'][i].metadata['source']
+                    folder_name = os.path.basename(os.path.dirname(source_path))
+                    user_context_info['docs_by_folder'][folder_name].add(
+                        os.path.splitext(os.path.basename(source_path))[0])
+                answer = f"Ответ на ваш вопрос:\n\n{resp['answer']}\n\n"
                 answer += "Основано на следующих документах:\n\n"
-                for doc in sorted(user_context_info['name_docs']):
-                    answer += f"- {doc}\n"
-            else:
-                answer += "Не удалось определить документы.\n"
+                for folder_name, docs in user_context_info['docs_by_folder'].items():
+                    answer += f"\nКатегория: {folder_name}\nДокументы:\n"
+                    for doc in docs:
+                        answer += f"- {doc}\n"
 
         await message.answer(answer)
-
-        markup = ReplyKeyboardMarkup(
-            keyboard=[
-                [KeyboardButton(text="Остаться в категории"), KeyboardButton(text="Выбрать другую категорию")]
-            ],
-            resize_keyboard=True,
-            one_time_keyboard=True
-        )
-        await state.set_state(CategorySelection.waiting_for_continue)
-        await message.answer("Хотите остаться в этой категории или выбрать другую?", reply_markup=markup)
-
     except ResponseError as ex:
         print(ex)
         await message.answer("Ваш запрос слишком длинный. Пожалуйста, сократите его и попробуйте снова.")
 
-@dp.message(StateFilter(CategorySelection.waiting_for_continue), F.text)
-async def handle_continue_choice(message: types.Message, state: FSMContext):
-    choice = message.text.lower()
-
-    if "остаться" in choice:
-        await state.set_state(CategorySelection.waiting_for_question)
-        await message.answer("Отлично! Задайте новый вопрос:", reply_markup=ReplyKeyboardRemove())
-    elif "категорию" in choice:
-        await categories_command(message, state)  # Возвращаем к выбору категории
-    else:
-        await message.answer("Пожалуйста, выберите один из предложенных вариантов.")
 
 @dp.message(F.text)
 async def handle_text_message(message: types.Message, state: FSMContext):
